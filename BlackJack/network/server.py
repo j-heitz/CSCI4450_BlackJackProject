@@ -7,7 +7,7 @@ from game.deck import Deck
 
 HOST = '0.0.0.0'
 PORT = 5555
-MAX_PLAYERS = 1  # set number of players for the table
+MAX_PLAYERS = 2  # set number of players for the table
 
 clients = []
 players = []
