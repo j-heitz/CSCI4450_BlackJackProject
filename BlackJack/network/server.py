@@ -1,168 +1,177 @@
 import socket
 import threading
-import pickle
 from game.blackjack import Round
-from game.player import Player, Dealer
 from game.deck import Deck
+from game.player import Player, Dealer
 
-HOST = '0.0.0.0'
+HOST = "localhost"
 PORT = 5555
-MAX_PLAYERS = 2  # set number of players for the table
 
-clients = []
-players = []
-player_hands = {}
-turn_index = 0
-game_started = False
 lock = threading.Lock()
+clients = {}  # socket -> Player name
+players = []
+max_players = 2
 
 deck = Deck()
 dealer = Dealer()
+current_round = None
+current_turn_index = 0
+game_started = False
 
-def send_to_client(conn, data):
-    conn.sendall(pickle.dumps(data))
-
-def broadcast(data):
-    for c in clients:
+def broadcast(message):
+    """Send a message to all connected clients."""
+    for client in clients:
         try:
-            c.sendall(pickle.dumps(data))
+            client.sendall(message.encode())
         except:
             pass
 
-def all_players_ready():
-    return len(clients) == MAX_PLAYERS
+def next_player_turn():
+    """Advance to the next player's turn, return next Player or None if done."""
+    global current_turn_index
+    current_turn_index += 1
+    while current_turn_index < len(players):
+        if not players[current_turn_index].is_busted():
+            return players[current_turn_index]
+        current_turn_index += 1
+    return None
 
 def handle_client(conn, addr):
-    global game_started, turn_index
+    global game_started, current_round, current_turn_index
+
+    conn.sendall(b"Welcome to Blackjack! Enter your name: ")
+    name = conn.recv(1024).decode().strip()
+
+    with lock:
+        if game_started:
+            conn.sendall(b"Game already started, please wait for the next round.\n")
+            conn.close()
+            return
+
+        player = Player(name)
+        players.append(player)
+        clients[conn] = name
+
+        broadcast(f"{name} joined the game.\n")
+
+        if len(players) == max_players:
+            game_started = True
+            current_round = Round(deck, players[0], dealer)
+            current_round.deal_initial()
+            current_turn_index = 0
+
+            broadcast("\nGame started!\n")
+            broadcast(show_game_state(hidden=True))
+            broadcast(f"\n{players[0].name}'s turn.\n")
 
     try:
-        name = conn.recv(1024).decode()
-        with lock:
-            player = Player(name)
-            players.append(player)
-            clients.append(conn)
-            print(f"{name} joined from {addr}")
-
-        send_to_client(conn, {"event": "wait", "message": "Waiting for other players..."})
-
-        # Wait until all players join
-        while not all_players_ready():
-            if game_started:
-                break
-
-        # Start game only once
-        with lock:
-            if not game_started:
-                game_started = True
-                start_game()
-
-        # Main message loop
         while True:
             data = conn.recv(1024)
             if not data:
                 break
-
-            action = data.decode().strip().lower()
+            command = data.decode().strip().lower()
 
             with lock:
-                current_player = players[turn_index]
-                if conn != clients[turn_index]:
-                    send_to_client(conn, {"event": "not_turn", "message": "It's not your turn!"})
+                if not game_started or current_round is None:
+                    conn.sendall(b"Game not started yet.\n")
                     continue
 
-                if action.startswith("h"):
+                current_player = players[current_turn_index]
+                if clients[conn] != current_player.name:
+                    conn.sendall(b"Not your turn.\n")
+                    continue
+
+                if command == "hit":
                     current_player.add_card(deck.deal())
+                    broadcast(f"{current_player.name} hits!\n")
+                    broadcast(show_game_state(hidden=True))
 
                     if current_player.is_busted():
-                        broadcast_state(f"{current_player.name} busted!")
-                        next_turn()
+                        broadcast(f"{current_player.name} busts!\n")
+                        next_p = next_player_turn()
+                        if next_p:
+                            broadcast(f"\n{next_p.name}'s turn.\n")
+                        else:
+                            end_round()
+                            continue
                     else:
-                        broadcast_state(f"{current_player.name} hits.")
-                elif action.startswith("s"):
-                    broadcast_state(f"{current_player.name} stands.")
-                    next_turn()
+                        continue
 
-    except Exception as e:
-        print(f"Error with {addr}: {e}")
+                elif command == "stand":
+                    broadcast(f"{current_player.name} stands.\n")
+                    next_p = next_player_turn()
+                    if next_p:
+                        broadcast(f"\n{next_p.name}'s turn.\n")
+                    else:
+                        end_round()
+                        continue
+
+                elif command == "quit":
+                    conn.sendall(b"Goodbye!\n")
+                    break
+
+                else:
+                    conn.sendall(b"Commands: hit, stand, quit\n")
+
+    except ConnectionResetError:
+        pass
     finally:
+        with lock:
+            if conn in clients:
+                left_name = clients.pop(conn)
+                broadcast(f"{left_name} left the game.\n")
         conn.close()
 
-def start_game():
-    global player_hands
-    broadcast({"event": "start", "message": "All players joined! Dealing cards..."})
+def show_game_state(hidden=False):
+    """Return a string describing the game state."""
+    lines = []
+    for p in players:
+        lines.append(str(p))
+    if hidden and dealer.hand:
+        lines.append(f"Dealer: {dealer.hand[0]}, Hidden")
+    else:
+        lines.append(f"Dealer: " + ", ".join(str(c) for c in dealer.hand) + f" (Value: {dealer.hand_value()})")
+    return "\n".join(lines)
 
-    # Deal 2 cards to each player, 2 to dealer
-    for player in players:
-        player.clear_hand()
-        player.add_card(deck.deal())
-        player.add_card(deck.deal())
-        player_hands[player.name] = player.hand
-
-    dealer.clear_hand()
-    dealer.add_card(deck.deal())
-    dealer.add_card(deck.deal())
-
-    broadcast_state("Initial deal complete.")
-    announce_turn()
-
-def broadcast_state(message):
-    """Send all hands and dealer info to everyone."""
-    state = {
-        "event": "update",
-        "message": message,
-        "dealer_up": str(dealer.hand[0]),
-        "players": {p.name: [str(c) for c in p.hand] for p in players},
-        "current_turn": players[turn_index].name if turn_index < len(players) else None
-    }
-    broadcast(state)
-
-def next_turn():
-    global turn_index
-
-    turn_index += 1
-    if turn_index >= len(players):
-        dealer_turn()
-        return
-    announce_turn()
-
-def announce_turn():
-    broadcast_state(f"It's {players[turn_index].name}'s turn.")
-
-def dealer_turn():
+def end_round():
+    """Dealer plays and results are broadcast."""
+    global game_started, current_turn_index
     dealer.play_out(deck)
+    results = []
 
-    results = {}
-    for player in players:
-        pv = player.hand_value()
-        dv = dealer.hand_value()
-        if player.is_busted():
-            results[player.name] = "Busted — Dealer wins"
+    dv = dealer.hand_value()
+    for p in players:
+        pv = p.hand_value()
+        if p.is_busted():
+            results.append(f"{p.name} busts. Dealer wins.")
         elif dealer.is_busted():
-            results[player.name] = "Dealer busts — Player wins"
+            results.append(f"{p.name} wins! Dealer busts.")
         elif pv > dv:
-            results[player.name] = "Player wins"
-        elif dv > pv:
-            results[player.name] = "Dealer wins"
+            results.append(f"{p.name} wins!")
+        elif pv == dv:
+            results.append(f"{p.name} pushes.")
         else:
-            results[player.name] = "Push (tie)"
+            results.append(f"{p.name} loses.")
 
-    broadcast({
-        "event": "results",
-        "message": "Dealer plays out.",
-        "dealer_final": [str(c) for c in dealer.hand],
-        "results": results
-    })
+    broadcast("\n--- Final Hands ---\n" + show_game_state(hidden=False))
+    broadcast("\n" + "\n".join(results) + "\n")
+    broadcast("\nRound over!\n")
 
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((HOST, PORT))
-    server.listen()
-    print(f"Server running on {HOST}:{PORT}")
+    game_started = False
+    current_turn_index = 0
+    for p in players:
+        p.clear_hand()
+    dealer.clear_hand()
 
-    while True:
-        conn, addr = server.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-        thread.start()
+def start_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen()
+        print(f"Server running on {HOST}:{PORT} ...")
+
+        while True:
+            conn, addr = s.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    main()
+    start_server()
