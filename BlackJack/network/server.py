@@ -55,14 +55,8 @@ def handle_client(conn, addr):
         broadcast(f"{name} joined the game.\n")
 
         if len(players) == max_players:
-            game_started = True
-            current_round = Round(deck, players[0], dealer)
-            current_round.deal_initial()
-            current_turn_index = 0
-
-            broadcast("\nGame started!\n")
-            broadcast(show_game_state(hidden=True))
-            broadcast(f"\n{players[0].name}'s turn.\n")
+            # start the round via helper (handles deck/dealer setup & dealing)
+            start_new_round()
 
     try:
         while True:
@@ -157,21 +151,71 @@ def end_round():
     broadcast("\n" + "\n".join(results) + "\n")
     broadcast("\nRound over!\n")
 
+    # reset round state
     game_started = False
     current_turn_index = 0
     for p in players:
         p.clear_hand()
     dealer.clear_hand()
 
-def start_server():
+    # automatically start a new round after short delay if enough players remain
+    def _maybe_restart():
+        with lock:
+            if len(players) >= 2:
+                start_new_round()
+            else:
+                broadcast("Waiting for more players to join to start the next round...\n")
+
+    # delay a few seconds so clients can read results
+    threading.Timer(5.0, _maybe_restart).start()
+
+def start_new_round():
+    """Initialize a new round: fresh deck, shuffle, deal, set current turn."""
+    global deck, dealer, current_round, current_turn_index, game_started
+
+    # prepare deck and dealer
+    deck = Deck()
+    if hasattr(deck, "shuffle"):
+        deck.shuffle()
+    dealer = Dealer()
+
+    # clear any residual hands (should be empty, but be safe)
+    for p in players:
+        p.clear_hand()
+    dealer.clear_hand()
+
+    # create round and deal
+    if not players:
+        game_started = False
+        return
+
+    current_round = Round(deck, players[0], dealer)
+    current_round.deal_initial()
+    current_turn_index = 0
+    game_started = True
+
+    # notify clients
+    broadcast("\n--- New Round Started ---\n")
+    broadcast(show_game_state(hidden=True))
+    broadcast(f"\n{players[current_turn_index].name}'s turn.\n")
+
+def start_server(host: str = "0.0.0.0", port: int = 5555):
+    """Start the simple socket server (binds to provided host/port)."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((HOST, PORT))
+        s.bind((host, port))
         s.listen()
-        print(f"Server running on {HOST}:{PORT} ...")
+        print(f"Server running on {host}:{port} ...")
 
         while True:
             conn, addr = s.accept()
             threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
+def run_server(host: str = "0.0.0.0", port: int = 5555):
+    """Entrypoint used by main.py — start the server with given host/port."""
+    try:
+        start_server(host=host, port=port)
+    except Exception as e:
+        print(f"[SERVER] Could not start server: {e}")
+
 if __name__ == "__main__":
-    start_server()
+    run_server(host="0.0.0.0", port=5555)
