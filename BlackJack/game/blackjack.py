@@ -54,7 +54,6 @@ class Round:
         self.deal_initial()
 
         if self.player.hand_value() == 21 or self.dealer.hand_value() == 21:
-            # reveal and decide immediately
             show_player_fn(self.player)
             print("Dealer (before play):", ", ".join(str(c) for c in self.dealer.hand), f"(Value: {self.dealer.hand_value()})")
             print("\n--- Reveal ---")
@@ -93,6 +92,19 @@ class Round:
 
         print("Dealer (final):", ", ".join(str(c) for c in self.dealer.hand), f"(Value: {self.dealer.hand_value()})")
         return self.determine_winner()
+
+def evaluate_player_outcome(player, dealer):
+    pv = player.hand_value()
+    dv = dealer.hand_value()
+    if player.is_busted():
+        return "LOSE"
+    if dealer.is_busted():
+        return "WIN"
+    if pv > dv:
+        return "WIN"
+    if pv == dv:
+        return "PUSH"
+    return "LOSE"
 
 if __name__ == "__main__":
     deck = Deck()

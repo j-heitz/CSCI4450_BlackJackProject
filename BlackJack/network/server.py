@@ -1,296 +1,237 @@
-import socket
-import threading
-import time
-from game.blackjack import Round
+import socket, threading, time
 from game.deck import Deck
 from game.player import Player, Dealer
+from game.blackjack import evaluate_player_outcome
 
-HOST = "localhost"
+HOST = "0.0.0.0"
 PORT = 5555
 
 lock = threading.Lock()
-clients = {}  
+clients = {}
 players = []
+waiting_players = []
 max_players = 5
 
 deck = Deck()
 dealer = Dealer()
-current_round = None
-current_turn_index = 0
 game_started = False
+current_turn_index = -1
+rounds_played = 0
 
 join_countdown_event = None
-join_countdown_thread = None
-between_round_event = None
-between_round_thread = None
+between_countdown_event = None
 
-def broadcast(message):
-    """Send a message to all connected clients."""
-    for client in list(clients.keys()):
+def broadcast(msg: str):
+    dead = []
+    for c in list(clients.keys()):
         try:
-            client.sendall(message.encode())
+            c.sendall(msg.encode())
         except:
-            try:
-                player = clients.pop(client)
-                if player in players:
-                    players.remove(player)
-            except:
-                pass
+            dead.append(c)
+    for d in dead:
+        try: d.close()
+        except: pass
+        p = clients.pop(d, None)
+        if p and p in players:
+            players.remove(p)
 
-
-def _broadcast_countdown(seconds, cancel_event, purpose="Starting"):
-    for s in range(seconds, 0, -1):
-        if cancel_event.is_set():
-            return
-        broadcast(f"{purpose} in {s} second{'s' if s != 1 else ''}...\n")
-        time.sleep(1)
-    if not cancel_event.is_set():
-        broadcast(f"{purpose} now!\n")
-
-def start_join_countdown(seconds: int = 10):
-    """Start a 10s countdown after the first player joins; cancelled if room fills."""
-    global join_countdown_event, join_countdown_thread
-
-    if join_countdown_thread and join_countdown_thread.is_alive():
-        return
-
-    join_countdown_event = threading.Event()
-
-    def _runner():
-        _broadcast_countdown(seconds, join_countdown_event, purpose="Game starting")
-        if join_countdown_event.is_set():
-            return
-        should_start = False
-        with lock:
-            if not game_started and len(players) > 0:
-                should_start = True
-        if should_start:
-            start_new_round()
-
-    join_countdown_thread = threading.Thread(target=_runner, daemon=True)
-    join_countdown_thread.start()
-
-def cancel_join_countdown():
-    global join_countdown_event
-    if join_countdown_event:
-        join_countdown_event.set()
-
-def start_between_round_countdown(seconds: int = 10):
-    """Start countdown between rounds and start next round automatically if enough players."""
-    global between_round_event, between_round_thread
-
-    if between_round_thread and between_round_thread.is_alive():
-        return
-
-    between_round_event = threading.Event()
-
-    def _runner():
-        _broadcast_countdown(seconds, between_round_event, purpose="Next round starting")
-        if between_round_event.is_set():
-            return
-        should_start = False
-        with lock:
-            if len(players) >= 1:
-                should_start = True
-        if should_start:
-            start_new_round()
+def push_state(hidden=True):
+    lines = []
+    for p in players:
+        hand_txt = ", ".join(str(c) for c in p.hand)
+        lines.append(f"STATE: PLAYER {p.name} | {hand_txt} | VALUE={p.hand_value()}")
+    if hidden:
+        if dealer.hand:
+            lines.append(f"STATE: DEALER HIDDEN | {dealer.hand[0]}")
         else:
-            broadcast("Waiting for more players to join to start the next round...\n")
+            lines.append("STATE: DEALER HIDDEN | (no card)")
+    else:
+        d_txt = ", ".join(str(c) for c in dealer.hand)
+        lines.append(f"STATE: DEALER Dealer | {d_txt} | VALUE={dealer.hand_value()}")
+    broadcast("\n".join(lines) + "\n")
 
-    between_round_thread = threading.Thread(target=_runner, daemon=True)
-    between_round_thread.start()
+def start_join_countdown(seconds=10):
+    global join_countdown_event
+    with lock:
+        if game_started or not players or rounds_played > 0 or join_countdown_event:
+            return
+        join_countdown_event = threading.Event()
 
-def next_player_turn():
-    """Advance to the next player's turn, return next Player or None if done."""
-    global current_turn_index
-    current_turn_index += 1
-    while current_turn_index < len(players):
-        if not players[current_turn_index].is_busted():
-            return players[current_turn_index]
+    def run():
+        for s in range(seconds, 0, -1):
+            if join_countdown_event.is_set(): return
+            broadcast(f"GAME_COUNTDOWN {s}\n")
+            time.sleep(1)
+        if join_countdown_event.is_set(): return
+        broadcast("GAME_START\n")
+        start_round()
+
+    threading.Thread(target=run, daemon=True).start()
+
+def start_between_round_countdown(seconds=8):
+    global between_countdown_event
+    with lock:
+        if game_started or not players or between_countdown_event:
+            return
+        between_countdown_event = threading.Event()
+
+    def run():
+        for s in range(seconds, 0, -1):
+            if between_countdown_event.is_set(): return
+            broadcast(f"GAME_COUNTDOWN {s}\n")
+            time.sleep(1)
+        if between_countdown_event.is_set(): return
+        broadcast("GAME_START\n")
+        start_round()
+
+    threading.Thread(target=run, daemon=True).start()
+
+def cancel_countdowns():
+    global join_countdown_event, between_countdown_event
+    if join_countdown_event: join_countdown_event.set(); join_countdown_event = None
+    if between_countdown_event: between_countdown_event.set(); between_countdown_event = None
+
+def start_round():
+    global deck, dealer, current_turn_index, game_started, rounds_played
+    with lock:
+        cancel_countdowns()
+        if not players:
+            return
+        game_started = True
+        rounds_played += 1
+        deck = Deck()
+        if hasattr(deck, "shuffle"): deck.shuffle()
+        dealer.clear_hand()
+        for p in players: p.clear_hand()
+        for _ in range(2):
+            for p in players:
+                p.add_card(deck.deal())
+            dealer.add_card(deck.deal())
+        broadcast("ROUND_START\n")
+        push_state(hidden=True)
+        dealer_blackjack = dealer.hand_value() == 21
+        player_blackjacks = any(p.hand_value() == 21 for p in players)
+        if dealer_blackjack or player_blackjacks:
+            push_state(hidden=False)
+            resolve_round(immediate=True)
+            return
+        current_turn_index = 0
+        broadcast(f"TURN: {players[0].name}\n")
+
+def next_turn():
+    global current_turn_index, game_started
+    with lock:
+        if not game_started: return
         current_turn_index += 1
-    return None
+        if current_turn_index >= len(players):
+            dealer_play()
+            return
+        broadcast(f"TURN: {players[current_turn_index].name}\n")
+
+def dealer_play():
+    while dealer.hand_value() < 17 or (dealer.hand_value() == 17 and dealer.soft_17()):
+        dealer.add_card(deck.deal())
+    push_state(hidden=False)
+    resolve_round(immediate=False)
+
+def resolve_round(immediate=False):
+    global game_started
+    winners, pushes, losers = [], [], []
+    for p in players:
+        outcome = evaluate_player_outcome(p, dealer)
+        if outcome == "WIN": winners.append(p.name)
+        elif outcome == "PUSH": pushes.append(p.name)
+        else: losers.append(p.name)
+        broadcast(f"RESULT: {p.name} {outcome}\n")
+    broadcast(f"RESULT_SUMMARY: WINNERS={','.join(winners) or '-'} PUSHES={','.join(pushes) or '-'} LOSERS={','.join(losers) or '-'}\n")
+    broadcast("ROUND_END\n")
+    game_started = False
+    for p in players: p.clear_hand()
+    dealer.clear_hand()
+
+    while waiting_players and len(players) < max_players:
+        np = waiting_players.pop(0)
+        players.append(np)
+        broadcast(f"EVENT: JOIN {np.name}\n")
+    if players:
+        start_between_round_countdown()
+
+def handle_action(player: Player, line: str):
+    cmd = line.strip().upper()
+    if not game_started: return
+    if players[current_turn_index] != player:
+        return
+    if cmd == "HIT":
+        card = deck.deal()
+        player.add_card(card)
+        broadcast(f"ACTION: HIT {player.name} {card}\n")
+        push_state(hidden=True)
+        if player.hand_value() > 21:
+            broadcast(f"ACTION: BUST {player.name}\n")
+            next_turn()
+        return
+    if cmd == "STAND":
+        broadcast(f"ACTION: STAND {player.name}\n")
+        next_turn()
+        return
+
+def remove_player(p: Player):
+    if p in players:
+        players.remove(p)
+    if p in waiting_players:
+        waiting_players.remove(p)
 
 def handle_client(conn, addr):
-    global game_started, current_round, current_turn_index
-
-    conn.sendall(b"Welcome to Blackjack! Enter your name: ")
-    name = conn.recv(1024).decode().strip()
-
-    with lock:
-        if game_started:
-            conn.sendall(b"Game already started, please wait for the next round.\n")
-            conn.close()
-            return
-
-        player = Player(name)
-        players.append(player)
-        clients[conn] = player
-
-        broadcast(f"{name} joined the game.\n")
-
-        if len(players) == 1:
-            start_join_countdown(seconds=10)
-
-        if len(players) >= max_players:
-            cancel_join_countdown()
-            start_new_round()
-
     try:
+        conn.sendall(b"Enter name:\n")
+        name = conn.recv(128).decode().strip()
+        if not name:
+            name = f"Player{len(clients)+1}"
+        with lock:
+            pl = Player(name)
+            clients[conn] = pl
+            if game_started:
+                waiting_players.append(pl)
+                conn.sendall(b"Round in progress. You will join next round.\n")
+                broadcast(f"EVENT: JOIN_WAIT {name}\n")
+            else:
+                players.append(pl)
+                broadcast(f"EVENT: JOIN {name}\n")
+                push_state(hidden=not game_started)
+                if rounds_played == 0:
+                    start_join_countdown()
+
         while True:
-            data = conn.recv(1024)
+            data = conn.recv(256)
             if not data:
                 break
-            command = data.decode().strip().lower()
-
-            with lock:
-                if not game_started or current_round is None:
-                    conn.sendall(b"Game not started yet.\n")
-                    continue
-                
-                if current_turn_index >= len(players):
-                    current_turn_index = 0
-
-                current_player = players[current_turn_index]
-                if clients.get(conn).name != current_player.name:
-                    conn.sendall(b"Not your turn.\n")
-                    continue
-
-                if command == "hit":
-                    current_player.add_card(deck.deal())
-                    broadcast(f"{current_player.name} hits!\n")
-                    broadcast(show_game_state(hidden=True))
-
-                    if current_player.is_busted():
-                        broadcast(f"{current_player.name} busts!\n")
-                        next_p = next_player_turn()
-                        if next_p:
-                            broadcast(f"\n{next_p.name}'s turn.\n")
-                        else:
-                            end_round()
-                            continue
-                    else:
-                        continue
-
-                elif command == "stand":
-                    broadcast(f"{current_player.name} stands.\n")
-                    next_p = next_player_turn()
-                    if next_p:
-                        broadcast(f"\n{next_p.name}'s turn.\n")
-                    else:
-                        end_round()
-                        continue
-
-                elif command == "quit":
-                    conn.sendall(b"Goodbye!\n")
-                    break
-
-                else:
-                    conn.sendall(b"Commands: hit, stand, quit\n")
-
-    except ConnectionResetError:
+            for line in data.decode().splitlines():
+                if line.lower() == "quit":
+                    raise ConnectionError()
+                handle_action(pl, line)
+    except:
         pass
     finally:
         with lock:
-            if conn in clients:
-                left_player = clients.pop(conn)
-                if left_player in players:
-                    players.remove(left_player)
-                broadcast(f"{left_player.name} left the game.\n")
-                if len(players) < max_players:
-                    game_started = False
-        conn.close()
+            p = clients.pop(conn, None)
+            if p:
+                remove_player(p)
+                broadcast(f"EVENT: LEAVE {p.name}\n")
+            if not game_started and players:
+                if rounds_played == 0 and not join_countdown_event:
+                    start_join_countdown()
+        try: conn.close()
+        except: pass
 
-def show_game_state(hidden=False):
-    """Return a string describing the game state."""
-    lines = []
-    for p in players:
-        lines.append(str(p))
-    if hidden and dealer.hand:
-        lines.append(f"Dealer: {dealer.hand[0]}, Hidden")
-    else:
-        lines.append(f"Dealer: " + ", ".join(str(c) for c in dealer.hand) + f" (Value: {dealer.hand_value()})")
-    return "\n".join(lines)
-
-def end_round():
-    """Dealer plays and results are broadcast."""
-    global game_started, current_turn_index, current_round
-    dealer.play_out(deck)
-    results = []
-
-    dv = dealer.hand_value()
-    for p in players:
-        pv = p.hand_value()
-        if p.is_busted():
-            results.append(f"{p.name} busts. Dealer wins.")
-        elif dealer.is_busted():
-            results.append(f"{p.name} wins! Dealer busts.")
-        elif pv > dv:
-            results.append(f"{p.name} wins!")
-        elif pv == dv:
-            results.append(f"{p.name} pushes.")
-        else:
-            results.append(f"{p.name} loses.")
-
-    broadcast("\n--- Final Hands ---\n" + show_game_state(hidden=False))
-    broadcast("\n" + "\n".join(results) + "\n")
-    broadcast("\nRound over!\n")
-
-    game_started = False
-    current_turn_index = 0
-    current_round = None
-    for p in players:
-        p.clear_hand()
-    dealer.clear_hand()
-
-    start_between_round_countdown(seconds=10)
-
-def start_new_round():
-    """Initialize a new round: fresh deck, shuffle, deal, set current turn."""
-    global deck, dealer, current_round, current_turn_index, game_started
-
-    with lock:
-
-        deck = Deck()
-        if hasattr(deck, "shuffle"):
-            deck.shuffle()
-        dealer = Dealer()
-
-        for p in players:
-            p.clear_hand()
-        dealer.clear_hand()
-
-        if not players:
-            game_started = False
-            return
-
-        current_round = Round(deck, players[0], dealer)
-        current_round.deal_initial()
-        current_turn_index = 0
-        game_started = True
-
-        cancel_join_countdown()
-
-        broadcast("\n--- New Round Started ---\n")
-        broadcast(show_game_state(hidden=True))
-        broadcast(f"\n{players[current_turn_index].name}'s turn.\n")
-
-def start_server(host: str = "0.0.0.0", port: int = 5555):
-    """Start the simple socket server (binds to provided host/port)."""
+def run_server(host=HOST, port=PORT):
+    print(f"Server on {host}:{port}")
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, port))
         s.listen()
-        print(f"Server running on {host}:{port} ...")
-
         while True:
-            conn, addr = s.accept()
-            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-
-def run_server(host: str = "0.0.0.0", port: int = 5555):
-    """Entrypoint used by main.py — start the server with given host/port."""
-    try:
-        start_server(host=host, port=port)
-    except Exception as e:
-        print(f"[SERVER] Could not start server: {e}")
+            c, a = s.accept()
+            threading.Thread(target=handle_client, args=(c, a), daemon=True).start()
 
 if __name__ == "__main__":
-    run_server(host="0.0.0.0", port=5555)
+    run_server()
