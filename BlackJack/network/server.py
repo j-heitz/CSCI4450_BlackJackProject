@@ -2,11 +2,13 @@ import socket, threading, time
 from game.deck import Deck
 from game.player import Player, Dealer
 from game.blackjack import evaluate_player_outcome
+from game.blackjack import Round
 
 HOST = "0.0.0.0"
 PORT = 5555
 
 lock = threading.Lock()
+join_countdown_lock = threading.Lock()
 clients = {}
 players = []
 waiting_players = []
@@ -52,7 +54,7 @@ def push_state(hidden=True):
 
 def start_join_countdown(seconds=10):
     global join_countdown_event
-    with lock:
+    with join_countdown_lock:
         if game_started or not players or rounds_played > 0 or join_countdown_event:
             return
         join_countdown_event = threading.Event()
@@ -70,7 +72,7 @@ def start_join_countdown(seconds=10):
 
 def start_between_round_countdown(seconds=8):
     global between_countdown_event
-    with lock:
+    with join_countdown_lock:
         if game_started or not players or between_countdown_event:
             return
         between_countdown_event = threading.Event()
@@ -124,15 +126,22 @@ def next_turn():
         if not game_started: return
         current_turn_index += 1
         if current_turn_index >= len(players):
+            broadcast("TURN: Dealer\n")
             dealer_play()
             return
         broadcast(f"TURN: {players[current_turn_index].name}\n")
 
 def dealer_play():
-    while dealer.hand_value() < 17 or (dealer.hand_value() == 17 and dealer.soft_17()):
-        dealer.add_card(deck.deal())
+    broadcast("TURN: Dealer\n")
+    try:
+        while dealer.should_hit():
+            dealer.add_card(deck.deal())
+            broadcast(f"ACTION: DEALER_HIT {dealer.hand[-1]}\n")
+    except Exception as e:
+        broadcast(f"SERVER_ERROR DealerPlay {type(e).__name__}: {e}\n")
     push_state(hidden=False)
     resolve_round(immediate=False)
+
 
 def resolve_round(immediate=False):
     global game_started
@@ -181,9 +190,8 @@ def remove_player(p: Player):
     if p in waiting_players:
         waiting_players.remove(p)
 
-def handle_client(conn, addr):
+def handle_client(conn):
     try:
-        conn.sendall(b"Enter name:\n")
         name = conn.recv(128).decode().strip()
         if not name:
             name = f"Player{len(clients)+1}"
@@ -231,7 +239,7 @@ def run_server(host=HOST, port=PORT):
         s.listen()
         while True:
             c, a = s.accept()
-            threading.Thread(target=handle_client, args=(c, a), daemon=True).start()
+            threading.Thread(target=handle_client, args=(c,), daemon=True).start()
 
 if __name__ == "__main__":
     run_server()

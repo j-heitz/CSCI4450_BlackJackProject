@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, font
 from network.client import BlackjackClient
 import re
 
@@ -37,7 +37,7 @@ class BlackjackGUI(tk.Tk):
         self.btn_stand = ttk.Button(top, text="Stand", command=lambda: self.send("STAND"))
         self.btn_hit.pack(side="left"); self.btn_stand.pack(side="left")
         self.count_var = tk.StringVar()
-        ttk.Label(top, textvariable=self.count_var, foreground="blue").pack(side="right")
+        ttk.Label(top, textvariable=self.count_var, foreground="white").pack(side="right")
 
         mid = ttk.Frame(self); mid.pack(fill="both", expand=True, padx=8, pady=4)
         self.tree = ttk.Treeview(mid, columns=("Name","Cards","Value","Status"), show="headings", height=14)
@@ -47,6 +47,18 @@ class BlackjackGUI(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         self.log = tk.Text(mid, width=40)
         self.log.pack(side="right", fill="both", expand=True)
+
+        self.log.configure(font=("Menlo", 11))
+        self.log.tag_config("header", foreground="#ffffff", background="#333333", font=("Menlo", 11, "bold"))
+        self.log.tag_config("action", foreground="#0b6e99")
+        self.log.tag_config("result_win", foreground="#008800", font=("Menlo", 11, "bold"))
+        self.log.tag_config("result_lose", foreground="#aa0000", font=("Menlo", 11, "bold"))
+        self.log.tag_config("result_push", foreground="#555555")
+        self.log.tag_config("event", foreground="#6e4fa3")
+        self.log.tag_config("countdown", foreground="#b8860b")
+        self.log.tag_config("turn", foreground="#004488", font=("Menlo", 11, "italic"))
+        self.log.tag_config("error", foreground="#ff0000", underline=1)
+
 
         self.after(100, self._pump)
         self._update_buttons()
@@ -90,28 +102,28 @@ class BlackjackGUI(tk.Tk):
             return
         rm = RESULT_RE.match(line)
         if rm:
-            self._log(line)
+            self._log(line, "result_push")
             return
         if SUMMARY_RE.match(line):
-            self._log(line)
+            self._log(line, "header")
             return
         em = EVENT_RE.match(line)
         if em:
-            self._log(line)
+            self._log(line, "event")
             return
         am = ACTION_RE.match(line)
         if am:
-            self._log(line)
+            self._log(line, "action")
             return
         if line in ("ROUND_START","ROUND_END"):
-            self._log(line)
+            self._log(line, "header")
             if line == "ROUND_START":
                 self.players = {}
                 self.dealer = {"cards":"", "value":"", "hidden":True}
                 self.turn = ""
                 self._rebuild()
             return
-        self._log(line)
+        self._log(line, "header")
 
     def _update_state_line(self, line):
         body = line[len("STATE:"):].strip()
@@ -163,8 +175,8 @@ class BlackjackGUI(tk.Tk):
             self.btn_hit.state(["disabled"])
             self.btn_stand.state(["disabled"])
 
-    def _log(self, line):
-        self.log.insert("end", line + "\n")
+    def _log(self, line, font_tag):
+        self.log.insert("end", f"{line}\n", font_tag)
         self.log.see("end")
 
 def run_gui():
