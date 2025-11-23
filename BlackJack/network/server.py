@@ -165,8 +165,11 @@ def resolve_round(immediate=False):
     if players:
         start_between_round_countdown()
 
-def handle_action(player: Player, line: str):
+def handle_action(player: Player, line: str, pingConn):
     cmd = line.strip().upper()
+    if cmd == "PING":
+        pingConn.sendall(b"PING\n")
+        return
     if not game_started: return
     if players[current_turn_index] != player:
         return
@@ -175,6 +178,9 @@ def handle_action(player: Player, line: str):
         player.add_card(card)
         broadcast(f"ACTION: HIT {player.name} {card}\n")
         push_state(hidden=True)
+        if player.hand_value() == 21:
+            broadcast(f"ACTION: BLACKJACK {player.name}\n")
+            next_turn()
         if player.hand_value() > 21:
             broadcast(f"ACTION: BUST {player.name}\n")
             next_turn()
@@ -183,6 +189,8 @@ def handle_action(player: Player, line: str):
         broadcast(f"ACTION: STAND {player.name}\n")
         next_turn()
         return
+
+
 
 def remove_player(p: Player):
     if p in players:
@@ -216,7 +224,7 @@ def handle_client(conn):
             for line in data.decode().splitlines():
                 if line.lower() == "quit":
                     raise ConnectionError()
-                handle_action(pl, line)
+                handle_action(pl, line, conn)
     except:
         pass
     finally:

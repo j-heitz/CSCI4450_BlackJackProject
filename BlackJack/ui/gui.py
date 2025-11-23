@@ -1,7 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, font
+import sv_ttk
 from network.client import BlackjackClient
+import platform
 import re
+import time
 
 COUNTDOWN_RE = re.compile(r"^GAME_COUNTDOWN (\d+)$")
 TURN_RE = re.compile(r"^TURN:\s+(.+)$")
@@ -10,6 +13,7 @@ RESULT_RE = re.compile(r"^RESULT:\s+(.+?)\s+(WIN|LOSE|PUSH)$", re.IGNORECASE)
 SUMMARY_RE = re.compile(r"^RESULT_SUMMARY:")
 EVENT_RE = re.compile(r"^EVENT:\s+(JOIN|LEAVE|JOIN_WAIT)\s+(.+)$")
 ACTION_RE = re.compile(r"^ACTION:\s+(HIT|STAND|BUST)\s+([^\s]+)(?:\s+(.*))?$")
+PING_RE = re.compile(r"^PING$")
 
 class BlackjackGUI(tk.Tk):
     def __init__(self):
@@ -23,6 +27,10 @@ class BlackjackGUI(tk.Tk):
         self.dealer = {"cards":"", "value":"", "hidden":True}
         self.turn = ""
         self.connected = False
+        self._ping_start_ns = None
+
+        if platform.system() == "Windows":
+            sv_ttk.set_theme("dark")
 
         top = ttk.Frame(self); top.pack(fill="x", pady=4)
         self.host_var = tk.StringVar(value="127.0.0.1")
@@ -35,13 +43,14 @@ class BlackjackGUI(tk.Tk):
         self.btn_connect.pack(side="left", padx=4)
         self.btn_hit = ttk.Button(top, text="Hit", command=lambda: self.send("HIT"))
         self.btn_stand = ttk.Button(top, text="Stand", command=lambda: self.send("STAND"))
-        self.btn_hit.pack(side="left"); self.btn_stand.pack(side="left")
+        self.btn_ping = ttk.Button(top, text="Ping", command=self.ping)
+        self.btn_hit.pack(side="left"); self.btn_stand.pack(side="left"); self.btn_ping.pack(side="left")
         self.count_var = tk.StringVar()
         ttk.Label(top, textvariable=self.count_var, foreground="white").pack(side="right")
 
         mid = ttk.Frame(self); mid.pack(fill="both", expand=True, padx=8, pady=4)
-        self.tree = ttk.Treeview(mid, columns=("Name","Cards","Value","Status"), show="headings", height=14)
-        for c in ("Name","Cards","Value","Status"):
+        self.tree = ttk.Treeview(mid, columns=("Name","Cards","Value","Status", "Ping"), show="headings", height=14)
+        for c in ("Name","Cards","Value","Status", "Ping"):
             self.tree.heading(c, text=c)
             self.tree.column(c, width=160 if c=="Cards" else 80, anchor="w")
         self.tree.pack(side="left", fill="both", expand=True)
@@ -62,6 +71,11 @@ class BlackjackGUI(tk.Tk):
 
         self.after(100, self._pump)
         self._update_buttons()
+
+    def ping(self):
+        self._ping_start_ns = time.perf_counter_ns()
+        self.send("PING")
+        print("Ping sent")
 
     def on_connect(self):
         if self.connected: return
@@ -115,6 +129,20 @@ class BlackjackGUI(tk.Tk):
         if am:
             self._log(line, "action")
             return
+        pm = PING_RE.match(line)
+        if pm:
+            print("Ping returned!")
+            #Set ping value to timer
+            if hasattr(self, "_ping_start_ns"):
+                elapsed_ns = time.perf_counter_ns() - self._ping_start_ns
+                self.ping_ms = round(elapsed_ns / 1_000_000)  # ns -> ms (float)
+            else:
+                self.ping_ms = ""  # no start time, edge case
+            my_name = self.name_var.get()
+            if my_name in self.players:
+                self.players[my_name]["ping"] = self.ping_ms
+            self._rebuild()
+            return
         if line in ("ROUND_START","ROUND_END"):
             self._log(line, "header")
             if line == "ROUND_START":
@@ -138,7 +166,7 @@ class BlackjackGUI(tk.Tk):
             val = ""
             if value_part.startswith("VALUE="):
                 val = value_part.split("=",1)[1]
-            self.players[name] = {"cards":cards, "value":val}
+            self.players[name] = {"cards":cards, "value":val, "ping": ""}
         elif role == "DEALER":
             hidden = tokens[1].upper() == "HIDDEN"
             if hidden:
@@ -154,15 +182,18 @@ class BlackjackGUI(tk.Tk):
         for i in self.tree.get_children():
             self.tree.delete(i)
         dealer_status = "Hidden" if self.dealer.get("hidden") else ""
-        turn_mark = "←" if self.turn == "Dealer" else ""
-        self.tree.insert("", "end", values=("Dealer", self.dealer["cards"], self.dealer["value"], dealer_status))
+        
+        turn_mark = " ←" if self.turn == "Dealer" else ""
+        self.tree.insert("", "end", values=("Dealer"+turn_mark, self.dealer["cards"], self.dealer["value"], dealer_status))
         for name in sorted(self.players.keys()):
             p = self.players[name]
             status = ""
             if p["value"] and int(p["value"]) > 21:
                 status = "Bust"
-            mark = "←" if self.turn == name else ""
-            self.tree.insert("", "end", values=(name, p["cards"], p["value"], status))
+            mark = " ←" if self.turn == name else ""
+            print(self.players)
+            ping = self.players[name]["ping"]
+            self.tree.insert("", "end", values=(name + mark, p["cards"], p["value"], status, ping))
 
     def _update_buttons(self):
         my_name = self.name_var.get()
@@ -171,9 +202,14 @@ class BlackjackGUI(tk.Tk):
         if state_ok:
             self.btn_hit.state(["!disabled"])
             self.btn_stand.state(["!disabled"])
+            
         else:
             self.btn_hit.state(["disabled"])
             self.btn_stand.state(["disabled"])
+        if self.connected:
+            self.btn_ping.state(["!disabled"])
+        else:
+            self.btn_ping.state(["disabled"])
 
     def _log(self, line, font_tag):
         self.log.insert("end", f"{line}\n", font_tag)
