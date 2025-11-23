@@ -190,7 +190,13 @@ def handle_action(player: Player, line: str, pingConn):
         next_turn()
         return
 
-
+def next_available_player_name():
+    used = {p.name for p in players} | {p.name for p in waiting_players}
+    used |= {p.name for p in clients.values()}
+    i = 1
+    while f"Player{i}" in used:
+        i += 1
+    return f"Player{i}"
 
 def remove_player(p: Player):
     if p in players:
@@ -201,8 +207,12 @@ def remove_player(p: Player):
 def handle_client(conn):
     try:
         name = conn.recv(128).decode().strip()
-        if not name:
-            name = f"Player{len(clients)+1}"
+        used = {p.name for p in players} | {p.name for p in waiting_players}
+        used |= {p.name for p in clients.values()}
+
+        # --- ADDED: if blank OR taken, assign next Player# ---
+        if (not name) or (name in used):
+            name = next_available_player_name()
         with lock:
             pl = Player(name)
             clients[conn] = pl
@@ -210,9 +220,11 @@ def handle_client(conn):
                 waiting_players.append(pl)
                 conn.sendall(b"Round in progress. You will join next round.\n")
                 broadcast(f"EVENT: JOIN_WAIT {name}\n")
+                conn.sendall(f"NAME: {name}\n".encode())
             else:
                 players.append(pl)
                 broadcast(f"EVENT: JOIN {name}\n")
+                conn.sendall(f"NAME: {name}\n".encode())
                 push_state(hidden=not game_started)
                 if rounds_played == 0:
                     start_join_countdown()

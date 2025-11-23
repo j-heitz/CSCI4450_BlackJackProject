@@ -14,6 +14,7 @@ SUMMARY_RE = re.compile(r"^RESULT_SUMMARY:")
 EVENT_RE = re.compile(r"^EVENT:\s+(JOIN|LEAVE|JOIN_WAIT)\s+(.+)$")
 ACTION_RE = re.compile(r"^ACTION:\s+(HIT|STAND|BUST)\s+([^\s]+)(?:\s+(.*))?$")
 PING_RE = re.compile(r"^PING$")
+NAME_RE = re.compile(r"^NAME:\s*(.+)$")
 
 class BlackjackGUI(tk.Tk):
     def __init__(self):
@@ -142,6 +143,10 @@ class BlackjackGUI(tk.Tk):
             if my_name in self.players:
                 self.players[my_name]["ping"] = self.ping_ms
             self._rebuild()
+            return
+        nm = NAME_RE.match(line)
+        if nm:
+            self.name_var.set(nm.group(1))
             return
         if line in ("ROUND_START","ROUND_END"):
             self._log(line, "header")
