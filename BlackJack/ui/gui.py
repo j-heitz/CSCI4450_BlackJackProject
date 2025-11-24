@@ -59,14 +59,14 @@ class BlackjackGUI(tk.Tk):
         self.log.pack(side="right", fill="both", expand=True)
 
         self.log.configure(font=("Menlo", 11))
-        self.log.tag_config("header", foreground="#ffffff", background="#333333", font=("Menlo", 11, "bold"))
+        self.log.tag_config("header", foreground="#ffffff", background="#333333", font=("Menlo", 12, "bold"))
         self.log.tag_config("action", foreground="#0b6e99")
-        self.log.tag_config("result_win", foreground="#008800", font=("Menlo", 11, "bold"))
-        self.log.tag_config("result_lose", foreground="#aa0000", font=("Menlo", 11, "bold"))
-        self.log.tag_config("result_push", foreground="#555555")
+        self.log.tag_config("result_win", foreground="#008800", font=("Menlo", 12, "bold"))
+        self.log.tag_config("result_lose", foreground="#aa0000", font=("Menlo", 12, "bold"))
+        self.log.tag_config("result_push", foreground="#E6DB12", font=("Menlo", 12))
         self.log.tag_config("event", foreground="#6e4fa3")
         self.log.tag_config("countdown", foreground="#b8860b")
-        self.log.tag_config("turn", foreground="#004488", font=("Menlo", 11, "italic"))
+        self.log.tag_config("turn", foreground="#004488", font=("Menlo", 12, "italic"))
         self.log.tag_config("error", foreground="#ff0000", underline=1)
 
 
